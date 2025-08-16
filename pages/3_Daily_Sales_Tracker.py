@@ -107,9 +107,41 @@ col1, col2 = st.columns(2)
 with col1:
     with st.container(border=True):
         st.header("Upload Monthly Report")
+
+        # ---- Guidance: last month's availability & path ----
+        last_month_date = (today.replace(day=1) - timedelta(days=1))
+        last_month_key = last_month_date.strftime("%Y-%m")
+        last_month_label = last_month_date.strftime("%B %Y")
+
+        last_month_available = False
+        try:
+            _existing_monthly_df = get_as_dataframe(monthly_reports_ws).dropna(how='all')
+            if not _existing_monthly_df.empty and 'Month' in _existing_monthly_df.columns:
+                last_month_available = last_month_key in _existing_monthly_df['Month'].astype(str).values
+        except Exception:
+            pass
+
+        if today.day == 1:
+            if last_month_available:
+                st.info(f"Last month's data ({last_month_label}) is already available.")
+            else:
+                st.info(f"Please upload the full Business Report for **{last_month_label}** (it's the 1st of the month).")
+        else:
+            if last_month_available:
+                st.info(f"Last month's data ({last_month_label}) is already available.")
+            else:
+                st.info(f"If not already done, please upload last month's report for **{last_month_label}**.")
+        
+        seller_url = "https://sellercentral.amazon.in/"
+        st.markdown(
+            f"**Path:** [Seller Central]({seller_url}) → Reports → Business Reports → By ASIN → "
+            f"Detail Page Sales and Traffic → Date: **{last_month_label}**"
+        )
+
+        # ---- Existing controls ----
         month_options = pd.date_range(end=today, periods=12, freq='MS').strftime("%Y-%m-%B").tolist()
         selected_month_str = st.selectbox("Select Month for Upload", options=month_options)
-        
+
         monthly_report_file = st.file_uploader("Upload Full Month Business Report", type=['csv'], key="monthly_uploader")
 
         if st.button("Submit Monthly Report"):
@@ -122,7 +154,7 @@ with col1:
                     # Read and tag the new monthly report
                     df_new_month = pd.read_csv(monthly_report_file)
                     df_new_month['Month'] = month_key
-                    
+
                     # Append new data to the main monthly sheet, replacing if month exists
                     existing_monthly_df = get_as_dataframe(monthly_reports_ws).dropna(how='all')
                     if not existing_monthly_df.empty and 'Month' in existing_monthly_df.columns:
@@ -135,12 +167,15 @@ with col1:
                     top_30 = df_new_month.nlargest(30, 'Units Ordered').copy()
                     top_30['Avg Daily Units'] = top_30['Units Ordered'] / days_in_month
                     top_30['Month'] = month_key
-                    
+
                     # Update the averages sheet
                     existing_avg_df = get_as_dataframe(top_asins_avg_ws).dropna(how='all')
                     if not existing_avg_df.empty and 'Month' in existing_avg_df.columns:
                         existing_avg_df = existing_avg_df[existing_avg_df['Month'] != month_key]
-                    updated_avg_df = pd.concat([existing_avg_df, top_30[['Month', 'ASIN', 'Title', 'Avg Daily Units']]], ignore_index=True)
+                    updated_avg_df = pd.concat(
+                        [existing_avg_df, top_30[['Month', 'ASIN', 'Title', 'Avg Daily Units']]],
+                        ignore_index=True
+                    )
                     set_with_dataframe(top_asins_avg_ws, updated_avg_df)
 
                     st.success(f"Baseline for {month_date.strftime('%B %Y')} processed successfully!")
@@ -150,8 +185,19 @@ with col1:
 with col2:
     with st.container(border=True):
         st.header("Upload Daily Report")
-        selected_date = st.date_input("Select Date for Upload", value=today - timedelta(days=1))
-        
+
+        # ---- Guidance: yesterday & path ----
+        yesterday = today - timedelta(days=1)
+        yesterday_label = yesterday.strftime("%d %b %Y")
+        st.info(f"Please upload **yesterday's** report: {yesterday_label}")
+        seller_url = "https://sellercentral.amazon.in/"
+        st.markdown(
+            f"**Path:** [Seller Central]({seller_url}) → Reports → Business Reports → By ASIN → "
+            f"Detail Page Sales and Traffic → Date: **{yesterday_label}**"
+        )
+
+        selected_date = st.date_input("Select Date for Upload", value=yesterday)
+
         daily_report_file = st.file_uploader("Upload Single Day Business Report", type=['csv'], key="daily_uploader")
 
         if st.button("Submit Daily Report"):
@@ -159,17 +205,16 @@ with col2:
                 with st.spinner("Processing daily data..."):
                     df_daily = pd.read_csv(daily_report_file)
                     df_daily['Date'] = selected_date.strftime("%Y-%m-%d")
-                    
+
                     # Append daily data to the sheet, replacing if date exists
                     existing_daily_df = get_as_dataframe(daily_reports_ws).dropna(how='all')
                     if not existing_daily_df.empty and 'Date' in existing_daily_df.columns:
-                         existing_daily_df = existing_daily_df[existing_daily_df['Date'] != selected_date.strftime("%Y-%m-%d")]
+                        existing_daily_df = existing_daily_df[existing_daily_df['Date'] != selected_date.strftime("%Y-%m-%d")]
                     updated_daily_df = pd.concat([existing_daily_df, df_daily], ignore_index=True)
                     set_with_dataframe(daily_reports_ws, updated_daily_df)
                     st.success(f"Report for {selected_date.strftime('%d-%b-%Y')} saved!")
             else:
                 st.error("Please upload a file.")
-
 
 st.markdown("---")
 

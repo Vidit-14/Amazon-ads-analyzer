@@ -3,7 +3,7 @@ import pandas as pd
 import gspread
 import numpy as np
 from gspread_dataframe import get_as_dataframe, set_with_dataframe
-from datetime import datetime
+from datetime import datetime, timedelta, date
 import altair as alt, math
 if not st.session_state.get("logged_in", False):
     st.switch_page("app.py")
@@ -194,7 +194,7 @@ def calculate_metrics(df, target_usp):
         if col not in df.columns:
             df[col] = 0
         else:
-            cleaned_col = df[col].astype(str).str.replace(r'[₹,]', '', regex=True)
+            cleaned_col = df[col].astype(str).str.replace(r'[₹,% ,]', '', regex=True)
             df[col] = pd.to_numeric(cleaned_col, errors='coerce').fillna(0)
 
     df['ASP ()'] = np.divide(df['Ordered Product Sales'], df['Units Ordered'], out=np.zeros_like(df['Ordered Product Sales'], dtype=float), where=df['Units Ordered']!=0)
@@ -222,7 +222,7 @@ def upload_dialog(spreadsheet):
     # Replace st.date_input with st.selectbox for month selection
     month_options = []
     current_date = datetime.now()
-    for i in range(24): # last 2 years
+    for i in range(24):  # last 2 years
         year = current_date.year - (i // 12)
         month = current_date.month - (i % 12)
         if month <= 0:
@@ -236,6 +236,34 @@ def upload_dialog(spreadsheet):
     )
 
     uploaded_file = st.file_uploader("Upload Raw Data File", type=['csv', 'xlsx'])
+
+    # --- ALWAYS show whether last month's data is available + path below uploader ---
+    try:
+        ws_check = spreadsheet.worksheet("ASIN_Health_Data")
+        existing_df_check = get_as_dataframe(ws_check).dropna(how='all')
+    except Exception:
+        existing_df_check = pd.DataFrame()
+
+    today_dt = date.today()
+    last_month_dt = (today_dt.replace(day=1) - timedelta(days=1))
+    last_month_key = last_month_dt.strftime("%Y-%m")
+    last_month_label = last_month_dt.strftime("%B %Y")
+
+    has_last_month = (
+        not existing_df_check.empty
+        and 'Month' in existing_df_check.columns
+        and (last_month_key in existing_df_check['Month'].astype(str).values)
+    )
+    if has_last_month:
+        st.success(f"Last month's data ({last_month_label}) is already available.")
+    else:
+        st.info(f"Last month's data for **{last_month_label}** is not available yet. Please upload it.")
+
+    seller_url = "https://sellercentral.amazon.in/"
+    st.markdown(
+        f"**Path:** [Seller Central]({seller_url}) → Reports → Business Reports → By ASIN →  \n"
+        f"Detail Page Sales and Traffic By Child Item→ Date: **{last_month_label}**"
+    )
 
     if st.button("Submit"):
         if uploaded_file and selected_month:
@@ -267,6 +295,7 @@ def upload_dialog(spreadsheet):
         else:
             st.warning("Please select a month and upload a file.")
 
+
 # --- View Rendering Functions ---
 
 def render_main_view(health_df, checklist_df, spreadsheet):
@@ -281,38 +310,69 @@ def render_main_view(health_df, checklist_df, spreadsheet):
     # Top Level Filters
     col1, col2 = st.columns([1, 2])
     with col1:
-        month_options = sorted(health_df['Month'].unique(), reverse=True)
-        selected_month = st.selectbox("Select Month to Analyze", options=month_options, key="selected_health_month_filter")
+        month_options = sorted(health_df['Month'].astype(str).unique(), reverse=True)
+        default_months = [month_options[0]] if month_options else []
+        # ---- NEW: multiselect for months ----
+        selected_months = st.multiselect("Select month(s) to analyze", options=month_options, default=default_months, key="selected_health_month_filter")
     with col2:
         target_usp = st.number_input(
             "Target Unit Session Percentage (e.g., 0.08 for 8%)",
             min_value=0.0, max_value=1.0, value=0.08, step=0.01, format="%.4f"
         )
+        st.session_state['target_usp'] = target_usp  # store for checklist view
 
     st.markdown("---")
 
-    # Data Processing for Selected Month
-    month_df = health_df[health_df['Month'] == st.session_state.selected_health_month_filter].copy()
-    if month_df.empty:
-        st.info(f"No data found for {st.session_state.selected_health_month_filter}.")
+    # Data Processing for Selected Months (aggregate across months)
+    if not selected_months:
+        st.info("Please select at least one month.")
         return pd.DataFrame()
 
-    calculated_df = calculate_metrics(month_df, target_usp)
+    month_df = health_df[health_df['Month'].astype(str).isin(selected_months)].copy()
+    if month_df.empty:
+        st.info(f"No data found for the selected months.")
+        return pd.DataFrame()
 
-    # Choose ASIN column
-    if '(Child) ASIN' in calculated_df.columns:
-        asin_col_name = '(Child) ASIN'
-    elif 'ASIN' in calculated_df.columns:
-        asin_col_name = 'ASIN'
-    else:
+    # Determine ASIN column and ensure Title column exists
+    asin_col_name = '(Child) ASIN' if '(Child) ASIN' in month_df.columns else ('ASIN' if 'ASIN' in month_df.columns else None)
+    if not asin_col_name:
         st.error("Fatal Error: Could not find a valid ASIN column in the data.")
         st.stop()
+    if 'Title' not in month_df.columns:
+        month_df['Title'] = ""
+
+    # Coerce raw numeric fields
+    def to_num(s):
+        return pd.to_numeric(s.astype(str).str.replace(r'[₹,% ,]', '', regex=True), errors='coerce').fillna(0)
+
+    for c in ['Ordered Product Sales', 'Units Ordered', 'Sessions - Total', 'Unit Session Percentage', 'Featured Offer Percentage']:
+        if c not in month_df.columns:
+            month_df[c] = 0
+        month_df[c] = to_num(month_df[c])
+
+    # Aggregate across selected months per ASIN (sum counts, sessions-weighted percentages)
+    def _agg_group(g):
+        sessions = g['Sessions - Total'].sum()
+        out = {
+            'Ordered Product Sales': g['Ordered Product Sales'].sum(),
+            'Units Ordered': g['Units Ordered'].sum(),
+            'Sessions - Total': sessions,
+            'Title': g['Title'].iloc[0],
+        }
+        out['Unit Session Percentage'] = (g['Unit Session Percentage'].mul(g['Sessions - Total']).sum() / sessions) if sessions > 0 else 0
+        out['Featured Offer Percentage'] = (g['Featured Offer Percentage'].mul(g['Sessions - Total']).sum() / sessions) if sessions > 0 else 0
+        return pd.Series(out)
+
+    aggregated_df = month_df.groupby(asin_col_name, dropna=False).apply(_agg_group).reset_index().rename(columns={asin_col_name: 'ASIN'})
+
+    # Recalculate metrics on the aggregated data
+    calculated_df = calculate_metrics(aggregated_df.copy(), target_usp)
 
     # Filters
     st.markdown("##### Filter by ASIN and Title")
     f_col1, f_col2 = st.columns(2)
     with f_col1:
-        asin_options = sorted([str(asin) for asin in calculated_df[asin_col_name].unique()])
+        asin_options = sorted([str(asin) for asin in calculated_df['ASIN'].unique()])
         selected_asins = st.multiselect("Filter by ASIN", options=asin_options)
     with f_col2:
         title_options = sorted(list(calculated_df['Title'].unique())) if 'Title' in calculated_df.columns else []
@@ -320,27 +380,34 @@ def render_main_view(health_df, checklist_df, spreadsheet):
 
     filtered_df = calculated_df.copy()
     if selected_asins:
-        filtered_df = filtered_df[filtered_df[asin_col_name].astype(str).isin(selected_asins)]
+        filtered_df = filtered_df[filtered_df['ASIN'].astype(str).isin(selected_asins)]
     if selected_titles and 'Title' in filtered_df.columns:
         filtered_df = filtered_df[filtered_df['Title'].isin(selected_titles)]
 
+    # --- NEW: Aggregated KPIs for the current selection ---
+    tot_sales = filtered_df['Ordered Product Sales'].sum() if 'Ordered Product Sales' in filtered_df.columns else 0.0
+    tot_units = filtered_df['Units Ordered'].sum() if 'Units Ordered' in filtered_df.columns else 0.0
+    tot_sessions = filtered_df['Sessions - Total'].sum() if 'Sessions - Total' in filtered_df.columns else 0.0
+    w_usp = (filtered_df['Unit Session Percentage'].mul(filtered_df['Sessions - Total']).sum() / tot_sessions) if tot_sessions > 0 else 0.0
+    w_bb = (filtered_df['Featured Offer Percentage'].mul(filtered_df['Sessions - Total']).sum() / tot_sessions) if tot_sessions > 0 else 0.0
+    asp = (tot_sales / tot_units) if tot_units > 0 else 0.0
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    with m1: st.metric("Total Sales", f"₹{tot_sales:,.2f}")
+    with m2: st.metric("Units Ordered", f"{int(tot_units):,}")
+    with m3: st.metric("Sessions", f"{int(tot_sessions):,}")
+    with m4: st.metric("Unit Session % (weighted)", f"{w_usp:.3f}")
+    with m5: st.metric("Buy Box % (weighted)", f"{w_bb:.3f}")
+
     # Build display df
-    # Exclude Parent columns explicitly
-    parent_exclude = ['Parent ASIN', '(Parent) ASIN']
-    raw_cols = [
-        col for col in month_df.columns
-        if col not in (['Month', asin_col_name, 'Title'] + parent_exclude)
-    ]
+    raw_cols = [c for c in ['Ordered Product Sales','Units Ordered','Sessions - Total','Unit Session Percentage','Featured Offer Percentage'] if c in filtered_df.columns]
     calculated_cols = [
         'ASP ()', 'Traffic Flag', 'Conversion Flag', 'Buy Box Flag', 'Opportunity',
         'Potential Units Gain', 'Potential Revenue Gain ()', 'Priority Score'
     ]
     final_column_order = ['ASIN', 'Title'] + raw_cols + calculated_cols
 
-    display_df = filtered_df.rename(columns={asin_col_name: "ASIN"}).copy()
-    # Remove any Parent columns if they slipped through
-    display_df = display_df.drop(columns=[c for c in parent_exclude if c in display_df.columns], errors='ignore')
-
+    display_df = filtered_df.copy()
     existing_ordered_cols = [col for col in final_column_order if col in display_df.columns]
     display_df = display_df[existing_ordered_cols]
 
@@ -353,9 +420,9 @@ def render_main_view(health_df, checklist_df, spreadsheet):
         if isinstance(val, str):
             v = val.lower()
             if v == "ok":
-                return "background-color: rgba(0, 200, 0, 0.12);"      # subtle green
+                return "background-color: rgba(0, 200, 0, 0.12);"
             if ("low" in v) or ("loss" in v):
-                return "background-color: rgba(255, 0, 0, 0.12);"      # subtle red
+                return "background-color: rgba(255, 0, 0, 0.12);"
         return ""
 
     styled = display_df.style.applymap(_flag_bg, subset=flag_cols)
@@ -381,7 +448,7 @@ def render_main_view(health_df, checklist_df, spreadsheet):
 def render_checklist_view(health_df, checklist_df, spreadsheet):
     """Renders the detailed checklist and charts for a selected ASIN."""
     asin = st.session_state.selected_health_asin
-    month = st.session_state.selected_health_month
+    month = st.session_state.selected_health_month  # this is now the most recent of the selected months
 
     if st.button("← Back to Main Dashboard"):
         st.session_state.selected_health_asin = None
@@ -521,5 +588,12 @@ else:
 
         if st.button(f"🔎 View Checklist for ASIN: {selected_asin}"):
             st.session_state.selected_health_asin = selected_asin
-            st.session_state.selected_health_month = st.session_state.selected_health_month_filter
+            # --- NEW: use the most recent month from the multiselect for the checklist ---
+            sel_months = st.session_state.get("selected_health_month_filter", [])
+            if isinstance(sel_months, list) and sel_months:
+                st.session_state.selected_health_month = max(sel_months)  # 'YYYY-MM' sorts correctly
+            else:
+                # fallback: try to pick the latest from data
+                possible_months = sorted(health_df['Month'].astype(str).unique())
+                st.session_state.selected_health_month = possible_months[-1] if possible_months else None
             st.rerun()

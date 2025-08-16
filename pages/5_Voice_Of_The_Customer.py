@@ -18,6 +18,39 @@ div[data-testid="stSidebarNav"] > div:first-child {
 }
 </style>
 """, unsafe_allow_html=True)
+
+st.markdown("""
+<style>
+/* --- Frosted glass upgrade for VOC cards --- */
+.card{
+  background: rgba(255,255,255,0.40);
+  border: 1px solid rgba(255,255,255,0.28);
+  box-shadow: 0 8px 24px rgba(0,0,0,.08);
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+}
+
+/* Make the colored status pills glassy while keeping their colors */
+.label{
+  position: relative;
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: .2px;
+  border: 1px solid rgba(255,255,255,.35);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 6px 18px rgba(0,0,0,.12);
+  backdrop-filter: blur(6px) saturate(140%);
+  -webkit-backdrop-filter: blur(6px) saturate(140%);
+}
+
+/* Same colors, softened as translucent gradients */
+.verypoor { background: linear-gradient(135deg, rgba(214,59,22,.90), rgba(214,59,22,.72)); }
+.poor     { background: linear-gradient(135deg, rgba(255,152,0,.90), rgba(255,152,0,.72)); }
+.fair     { background: linear-gradient(135deg, rgba(245,193,26,.90), rgba(245,193,26,.72)); }
+.good     { background: linear-gradient(135deg, rgba(166,206,57,.90), rgba(166,206,57,.72)); }
+.excellent{ background: linear-gradient(135deg, rgba(46,125,50,.90), rgba(46,125,50,.72)); }
+</style>
+""", unsafe_allow_html=True)
+
 # ── Page config must be first Streamlit call ─────────────────────────────────────
 st.set_page_config(page_title="Voice of the Customer", layout="wide")
 
@@ -262,7 +295,9 @@ def upload_dialog(spreadsheet):
     st.write("Upload the latest VOC report. A snapshot will be saved for the selected date.")
     snap_date = st.date_input("Snapshot Date", value=date.today())
     file = st.file_uploader("Upload CSV or Excel", type=["csv","xlsx","xls"])
-    st.caption("Expected headers: " + ", ".join([c for c in REQUIRED_COLS if c!='Snapshot Date']))
+
+    # Added: path guidance directly below the upload button
+    st.markdown("**Path:** Seller central → Performance → Voice of the Customer → Download data")
 
     if st.button("Submit"):
         if not file:
@@ -316,6 +351,7 @@ def upload_dialog(spreadsheet):
         save_snapshot(spreadsheet, df)
         st.success("Snapshot saved.")
         st.rerun()
+
 
 # ── Main ────────────────────────────────────────────────────────────────────────
 spreadsheet = connect_to_gsheet()

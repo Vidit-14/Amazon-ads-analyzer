@@ -255,19 +255,101 @@ def show_change_logs_dialog(spreadsheet):
 
 @st.dialog("Upload Reports")
 def upload_dialog(spreadsheet, country_name, country_code):
-    """Dialog to handle file uploads and append data to Google Sheets."""
+    """Dialog to handle file uploads and append data to Google Sheets, with guidance on latest dates and paths."""
     st.info(f"You are uploading reports for: **{country_name}**")
-    
-    # Main Ad Reports
-    uploaded_adv = st.file_uploader("Upload Advertised Product Report (.xlsx)", type="xlsx", key="adv_uploader")
-    uploaded_tgt = st.file_uploader("Upload Targeting Report (.xlsx)", type="xlsx", key="tgt_uploader")
 
-    # --- NEW: Conditional uploader for India Sales Report ---
+    # --- Compute "yesterday" for date-range guidance ---
+    today = datetime.now().date()
+    yesterday = today - timedelta(days=1)
+    yesterday_str = yesterday.strftime("%d %b %Y")
+
+    # Clickable bases
+    ads_url = "https://advertising.amazon.com/"
+    seller_url = "https://sellercentral.amazon.in/" if country_name == "India" else "https://sellercentral.amazon.com/"
+
+    # --- Read latest date from Advertised Product sheet ---
+    adv_latest_date = None
+    try:
+        ws_adv_existing = spreadsheet.worksheet(f"Advertised_product_{country_code}")
+        adv_existing_df = pd.DataFrame(ws_adv_existing.get_all_records())
+        if not adv_existing_df.empty and 'Date' in adv_existing_df.columns:
+            # Dates are stored as strings like 'Jul 06, 2025'
+            adv_existing_df['Date'] = pd.to_datetime(adv_existing_df['Date'], format="%b %d, %Y", errors='coerce')
+            # Fallback if format differs
+            if adv_existing_df['Date'].isna().all():
+                adv_existing_df['Date'] = pd.to_datetime(adv_existing_df['Date'], errors='coerce')
+            max_dt = adv_existing_df['Date'].max()
+            if pd.notna(max_dt):
+                adv_latest_date = max_dt.date()
+    except Exception as e:
+        st.warning(f"Could not read latest date from Advertised_product_{country_code}: {e}")
+
+    # --- Display latest Advertised Product date at the top ---
+    if adv_latest_date:
+        st.success(f"Latest date in **Advertised Product** report: {adv_latest_date.strftime('%d %b %Y')}")
+        adv_next_date = adv_latest_date + timedelta(days=1)
+    else:
+        st.info("No previous **Advertised Product** data found. Upload from your earliest available date.")
+        adv_next_date = None
+
+    # --- Main Ad Reports uploaders ---
+    uploaded_adv = st.file_uploader("Upload Advertised Product Report (.xlsx)", type="xlsx", key="adv_uploader")
+    # Path exactly below its uploader
+    adv_start_str = adv_next_date.strftime("%d %b %Y") if adv_next_date else "earliest available date"
+    st.markdown(
+        f"**Path:** [Amazon Ads]({ads_url}) → Sidebar → Measurement & Reporting → Sponsored ads reports → Create Report → "
+        f"Report Category: **Sponsored Products** → Report Type: **Advertised Product** → Time unit: **Daily** → "
+        f"**Report period: {adv_start_str} to {yesterday_str}**"
+    )
+
+    uploaded_tgt = st.file_uploader("Upload Targeting Report (.xlsx)", type="xlsx", key="tgt_uploader")
+    # Path exactly below its uploader (uses same start as Advertised Product)
+    tgt_start_str = adv_start_str
+    st.markdown(
+        f"**Path:** [Amazon Ads]({ads_url}) → Sidebar → Measurement & Reporting → Sponsored ads reports → Create Report → "
+        f"Report Category: **Sponsored Products** → Report Type: **Targeting** → Time unit: **Daily** → "
+        f"**Report period: {tgt_start_str} to {yesterday_str}**"
+    )
+
+    # --- Conditional uploader for India Sales (Orders) Report ---
     uploaded_sales = None
+    orders_latest_date = None
+    orders_next_date = None
     if country_name == "India":
         st.markdown("---")
-        uploaded_sales = st.file_uploader("Upload Amazon Fulfilled Sales Report (for Organic Sales)", type=['xlsx', 'csv'])
 
+        # Read latest date from Orders sheet (correct sheet: 'Orders_IND')
+        try:
+            ws_orders_existing = spreadsheet.worksheet("Orders_IND")
+            orders_existing_df = pd.DataFrame(ws_orders_existing.get_all_records())
+            if not orders_existing_df.empty:
+                # Typical Amazon All Orders export column name is 'purchase-date'
+                possible_date_cols = ['purchase-date', 'Purchase Date', 'purchase_date', 'Date']
+                found_date_col = next((c for c in possible_date_cols if c in orders_existing_df.columns), None)
+                if found_date_col:
+                    orders_existing_df['__tmp_date'] = pd.to_datetime(orders_existing_df[found_date_col], errors='coerce')
+                    max_orders_dt = orders_existing_df['__tmp_date'].max()
+                    if pd.notna(max_orders_dt):
+                        orders_latest_date = max_orders_dt.date()
+        except Exception as e:
+            st.warning(f"Could not read latest date from Orders sheet: {e}")
+
+        # Display latest Orders date just above its uploader
+        if orders_latest_date:
+            st.success(f"Latest date in **Orders** report: {orders_latest_date.strftime('%d %b %Y')}")
+            orders_next_date = orders_latest_date + timedelta(days=1)
+        else:
+            st.info("No previous **Orders** data found. Upload from your earliest available date.")
+
+        uploaded_sales = st.file_uploader("Upload Orders Report (for Organic Sales)", type=['xlsx', 'csv'])
+        # Path exactly below its uploader
+        orders_start_str = orders_next_date.strftime("%d %b %Y") if orders_next_date else "earliest available date"
+        st.markdown(
+            f"**Path:** [Seller Central]({seller_url}) → Reports → Fulfillment → Sales → **All Orders** → "
+            f"**Date: {orders_start_str} to {yesterday_str}**"
+        )
+
+    # --- Processing & appending logic (unchanged except Orders sheet name) ---
     if st.button("Process and Append Data"):
         if uploaded_adv and uploaded_tgt:
             try:
@@ -284,16 +366,15 @@ def upload_dialog(spreadsheet, country_name, country_code):
                     ws_tgt = spreadsheet.worksheet(f"Targeting_{country_code}")
                     ws_adv.append_rows(df_adv.values.tolist(), value_input_option='USER_ENTERED')
                     ws_tgt.append_rows(df_tgt.values.tolist(), value_input_option='USER_ENTERED')
-                    
-                    # --- NEW: Process Sales Report if uploaded for India ---
+
+                    # Process Sales Report if uploaded for India (append to 'Orders_IND')
                     if uploaded_sales and country_name == "India":
                         if uploaded_sales.name.endswith('.csv'):
                             df_sales = pd.read_csv(uploaded_sales)
                         else:
                             df_sales = pd.read_excel(uploaded_sales)
-                        
-                        # Append data to the sales sheet (no de-duplication needed for sales)
-                        ws_sales = spreadsheet.worksheet("Fulfilled_Sales_IND")
+
+                        ws_sales = spreadsheet.worksheet("Orders_IND")
                         ws_sales.append_rows(df_sales.values.tolist(), value_input_option='USER_ENTERED')
 
                 st.success("✅ Data appended successfully! The dashboard will now refresh.")
@@ -303,7 +384,8 @@ def upload_dialog(spreadsheet, country_name, country_code):
             except Exception as e:
                 st.error(f"An error occurred during the upload process: {e}")
         else:
-            st.warning("⚠️ Please upload at least the two advertising reports before processing.")
+            st.warning("⚠️ Please upload the two reports before processing.")
+
 
 # --- Views / Pages ---
 
